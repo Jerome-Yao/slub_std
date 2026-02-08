@@ -13,6 +13,7 @@ namespace slub {
     constexpr size_t PAGES_PER_SLAB = 1;
     constexpr size_t SLAB_BYTES     = PAGE_SIZE * PAGES_PER_SLAB;
     constexpr size_t ALIGN          = 16;
+    constexpr int SLAB_KMAX = 2048;
 
     struct Buddy {
         static void *alloc_pages(size_t pages);
@@ -69,6 +70,9 @@ namespace slub {
         : public std::integral_constant<size_t, alignof(ObjType)> {};
 
     template <typename ObjType>
+    concept HugeObjectType = (size_of_type<ObjType>::value >= SLAB_KMAX);
+
+    template <typename ObjType>
     class SlubAllocator {
     protected:
         static constexpr size_t raw_obj_size_  = size_of_type<ObjType>::value;
@@ -95,7 +99,6 @@ namespace slub {
                       "obj_align_ must be power-of-two");
 
     public:
-        static constexpr int kMax = 2048;
         SlubAllocator();
         void *alloc();
         void free(void *ptr);
@@ -140,6 +143,28 @@ namespace slub {
         void to_full(SlabHeader *slab);
 
         void inner_free(void *ptr);
+    };
+
+    template <HugeObjectType ObjType>
+    class SlubAllocator<ObjType> {
+    public:
+        SlubAllocator() {
+        }
+        void *alloc() {
+            return Buddy::alloc_pages(
+                (sizeof(ObjType) + PAGE_SIZE - 1) / PAGE_SIZE);
+        }
+        void free(void *ptr) {
+            if (!ptr) {
+                printf("can't free nullptr\n");
+                return;
+            }
+            Buddy::free_pages(
+                ptr, (sizeof(ObjType) + PAGE_SIZE - 1) / PAGE_SIZE);
+        }
+        SlubStats get_stats() const {
+            return {0, 0, 0, 0};
+        }
     };
 
     template <typename ObjType>
@@ -222,10 +247,6 @@ namespace slub {
 
     template <typename ObjType>
     void *SlubAllocator<ObjType>::alloc() {
-        if constexpr (obj_size_ > kMax) {
-            constexpr size_t pages = (obj_size_ + PAGE_SIZE - 1) / PAGE_SIZE;
-            return Buddy::alloc_pages(pages);
-        }
         SlabHeader *slab = nullptr;
         if (!partial.empty()) {
             slab = &partial.back();
@@ -276,11 +297,6 @@ namespace slub {
     void SlubAllocator<ObjType>::free(void *ptr) {
         if (!ptr) {
             printf("can't free nullptr\n");
-            return;
-        }
-        if constexpr (obj_size_ > kMax) {
-            constexpr size_t pages = (obj_size_ + PAGE_SIZE - 1) / PAGE_SIZE;
-            Buddy::free_pages(ptr, pages);
             return;
         }
 
