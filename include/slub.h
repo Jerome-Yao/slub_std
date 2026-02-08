@@ -22,6 +22,8 @@ namespace slub {
         static size_t get_total_allocated_pages();
         static double get_alloc_time_ms();
         static double get_free_time_ms();
+        static size_t get_alloc_count();
+        static size_t get_free_count();
         static void reset_timers();
     };
 
@@ -31,6 +33,8 @@ namespace slub {
         size_t objects_total;
         size_t memory_usage_bytes;
     };
+
+    void init_chrono_overhead();
 
     static inline std::uintptr_t align_down(std::uintptr_t addr,
                                             std::uintptr_t align) {
@@ -148,11 +152,13 @@ namespace slub {
     template <HugeObjectType ObjType>
     class SlubAllocator<ObjType> {
     public:
-        SlubAllocator() {
+        SlubAllocator() : inuse_objects_(0) {
         }
         void *alloc() {
-            return Buddy::alloc_pages(
+            void* p = Buddy::alloc_pages(
                 (sizeof(ObjType) + PAGE_SIZE - 1) / PAGE_SIZE);
+            if (p) inuse_objects_++;
+            return p;
         }
         void free(void *ptr) {
             if (!ptr) {
@@ -161,10 +167,19 @@ namespace slub {
             }
             Buddy::free_pages(
                 ptr, (sizeof(ObjType) + PAGE_SIZE - 1) / PAGE_SIZE);
+            inuse_objects_--;
         }
         SlubStats get_stats() const {
-            return {0, 0, 0, 0};
+            size_t pages_per_obj = (sizeof(ObjType) + PAGE_SIZE - 1) / PAGE_SIZE;
+            return {
+                inuse_objects_, // Each huge object is effectively its own slab
+                inuse_objects_,
+                inuse_objects_,
+                inuse_objects_ * pages_per_obj * PAGE_SIZE
+            };
         }
+    private:
+        size_t inuse_objects_;
     };
 
     template <typename ObjType>
@@ -195,7 +210,7 @@ namespace slub {
 
         // construct from end to start
         for (size_t i = total; i > 0; i--) {
-            void *obj = reinterpret_cast<void *>(cur + i * obj_size_);
+            void *obj = reinterpret_cast<void *>(cur + (i - 1) * obj_size_);
             *reinterpret_cast<void **>(obj) = head;
             head                            = obj;
         }
