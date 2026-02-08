@@ -13,7 +13,7 @@
 namespace slub {
     void *Buddy::alloc_pages(size_t pages) {
         const size_t bytes = pages * PAGE_SIZE;
-        void *ptr          = std::aligned_alloc(bytes, bytes);
+        void *ptr          = std::aligned_alloc(PAGE_SIZE, bytes);
         if (!ptr)
             return nullptr;
         std::memset(ptr, 0, bytes);
@@ -150,10 +150,11 @@ namespace slub {
             uint32_t pages  = (n + overhead + PAGE_SIZE - 1) / PAGE_SIZE;
 
             void *base = Buddy::alloc_pages(pages);
-            void *user_addr =
-                reinterpret_cast<void *>(align_up(reinterpret_cast<uintptr_t>(base + sizeof(BigAllocatorHeader)), ALIGN));
+            void *user_addr = reinterpret_cast<void *>(
+                align_up(reinterpret_cast<uintptr_t>(base) + sizeof(BigAllocatorHeader), ALIGN));
 
-            void *hdr_addr = user_addr - sizeof(BigAllocatorHeader);
+            void *hdr_addr = reinterpret_cast<void *>(
+                reinterpret_cast<uintptr_t>(user_addr) - sizeof(BigAllocatorHeader));
 
             auto *hdr     = reinterpret_cast<BigAllocatorHeader *>(hdr_addr);
             hdr           = reinterpret_cast<BigAllocatorHeader *>(hdr_addr);
@@ -173,7 +174,7 @@ namespace slub {
             return;
         }
         auto *big_header = reinterpret_cast<BigAllocatorHeader *>(
-            ptr - sizeof(BigAllocatorHeader));
+            reinterpret_cast<std::byte *>(ptr) - sizeof(BigAllocatorHeader));
         if (big_header->magic == MAGIC) {
             assert(big_header->raw_base != nullptr);
             assert(big_header->pages > 0);
@@ -317,10 +318,10 @@ int main() {
         allocator.free(p4);
         allocator.free(p5);
 
-        // NOTE: free(ptr) for large allocations (> kMax) is not implemented
-        // yet. Keep large-object free on the size-aware API for now.
+        // Large-object path should be freeable via free(ptr).
         void *big = allocator.alloc(4096);
         assert(big != nullptr);
+        assert(reinterpret_cast<uintptr_t>(big) % ALIGN == 0);
         std::memset(big, 0xAB, 4096);
         allocator.free(big);
     }
@@ -371,6 +372,43 @@ int main() {
         for (void *p : ptrs) {
             cache.free(p);
         }
+    }
+    std::cout << "  Passed." << std::endl;
+
+    std::cout << "[Test 6] SlubAllocator Big Alloc Alignment & Free(ptr)" << std::endl;
+    {
+        SlubAllocator allocator;
+
+        // Boundary and larger big-allocation cases.
+        std::vector<size_t> big_sizes = {2049, 4096, 4097, 8192, 16384};
+        std::vector<void *> big_ptrs;
+        big_ptrs.reserve(big_sizes.size());
+
+        for (size_t n : big_sizes) {
+            void *p = allocator.alloc(n);
+            assert(p != nullptr);
+            assert(reinterpret_cast<uintptr_t>(p) % ALIGN == 0);
+            std::memset(p, 0xCD, n);
+            big_ptrs.push_back(p);
+        }
+
+        for (void *p : big_ptrs) {
+            allocator.free(p);
+        }
+
+        // Mixed small + big free(ptr) order.
+        void *s1 = allocator.alloc(64);
+        void *b1 = allocator.alloc(5000);
+        void *s2 = allocator.alloc(128);
+        void *b2 = allocator.alloc(9000);
+        assert(s1 && b1 && s2 && b2);
+        assert(reinterpret_cast<uintptr_t>(b1) % ALIGN == 0);
+        assert(reinterpret_cast<uintptr_t>(b2) % ALIGN == 0);
+
+        allocator.free(b2);
+        allocator.free(s1);
+        allocator.free(b1);
+        allocator.free(s2);
     }
     std::cout << "  Passed." << std::endl;
 
