@@ -10,6 +10,50 @@
 
 using namespace slub;
 
+double g_now_overhead_ms = 0;
+
+void calibrate_timer() {
+    const int iterations = 1000000;
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        auto t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        (void)t1;
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    double g_now_overhead_8_ms = std::chrono::duration<double, std::milli>(end - start).count() / iterations;
+
+    start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        auto t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
+        (void)t1;
+    }
+    end = std::chrono::high_resolution_clock::now();
+    double g_now_overhead_16_ms = std::chrono::duration<double, std::milli>(end - start).count() / iterations;
+    g_now_overhead_ms = (g_now_overhead_16_ms - g_now_overhead_8_ms) / 8.0;
+}
+
 void print_buddy_stats() {
     std::cout << "[Buddy Status] " << "Current: " << Buddy::get_current_pages()
               << " pages (" << Buddy::get_current_pages() * PAGE_SIZE / 1024
@@ -42,25 +86,30 @@ void run_benchmark(const std::string& name, int iterations) {
     std::cout << ">>> Running Benchmark: " << name << " (" << iterations
               << " iterations, " << RUNS << " runs)" << std::endl;
 
-    SlubStats final_stats;
+    SlubStats peak_stats;
 
     for (int r = 0; r < RUNS; ++r) {
         SlubAllocator<T> alloc;
         std::vector<void*> ptrs;
-        ptrs.reserve(iterations);
+        ptrs.resize(iterations);
 
         // Alloc Phase
         Buddy::reset_timers();
         auto start = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < iterations; ++i) {
-            ptrs.push_back(alloc.alloc());
+            ptrs[i] = alloc.alloc();
         }
         auto end = std::chrono::high_resolution_clock::now();
         
         double buddy_alloc_ms = Buddy::get_alloc_time_ms();
+        size_t buddy_alloc_count = Buddy::get_alloc_count();
         double total_alloc_ms = std::chrono::duration<double, std::milli>(end - start).count();
         alloc_times.push_back(total_alloc_ms);
-        pure_alloc_ns.push_back(((total_alloc_ms - buddy_alloc_ms) * 1e6) / iterations);
+        
+        double pure_alloc_ms = total_alloc_ms - buddy_alloc_ms - (buddy_alloc_count * g_now_overhead_ms);
+        pure_alloc_ns.push_back((pure_alloc_ms * 1e6) / iterations);
+
+        if (r == RUNS - 1) peak_stats = alloc.get_stats();
 
         // Free Phase
         Buddy::reset_timers();
@@ -71,11 +120,12 @@ void run_benchmark(const std::string& name, int iterations) {
         end = std::chrono::high_resolution_clock::now();
         
         double buddy_free_ms = Buddy::get_free_time_ms();
+        size_t buddy_free_count = Buddy::get_free_count();
         double total_free_ms = std::chrono::duration<double, std::milli>(end - start).count();
         free_times.push_back(total_free_ms);
-        pure_free_ns.push_back(((total_free_ms - buddy_free_ms) * 1e6) / iterations);
-
-        if (r == RUNS - 1) final_stats = alloc.get_stats();
+        
+        double pure_free_ms = total_free_ms - buddy_free_ms - (buddy_free_count * g_now_overhead_ms);
+        pure_free_ns.push_back((pure_free_ms * 1e6) / iterations);
     }
 
     print_metric("Total Alloc Time", alloc_times, "ms");
@@ -83,7 +133,9 @@ void run_benchmark(const std::string& name, int iterations) {
     print_metric("Total Free Time", free_times, "ms");
     print_metric("Pure SLUB Free", pure_free_ns, "ns/op");
     
-    std::cout << "  - Final Slub Memory      : " << final_stats.memory_usage_bytes / 1024 << " KB (" << final_stats.total_slabs << " slabs)" << std::endl;
+    std::cout << "  - Peak Slub Memory       : " << peak_stats.memory_usage_bytes / 1024 << " KB (" << peak_stats.total_slabs << " slabs)" << std::endl;
+    std::cout << "  - Object Utilization     : " << peak_stats.objects_inuse << " / " << peak_stats.objects_total 
+              << " (" << (peak_stats.objects_total > 0 ? (double)peak_stats.objects_inuse / peak_stats.objects_total * 100.0 : 0) << "%)" << std::endl;
     std::cout << std::endl;
 }
 
@@ -101,7 +153,10 @@ struct Huge {
 };  // Above kMax (2048)
 
 int main() {
+    calibrate_timer();
+
     std::cout << "=== SLUB Allocator Benchmark ===" << std::endl;
+    std::cout << "Clock overhead: " << g_now_overhead_ms * 1e6 << " ns/call" << std::endl;
     print_buddy_stats();
     std::cout << std::endl;
 

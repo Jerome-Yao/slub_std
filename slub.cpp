@@ -15,6 +15,8 @@ namespace slub {
     static size_t g_current_pages = 0;
     static double g_buddy_alloc_time_ms = 0;
     static double g_buddy_free_time_ms = 0;
+    static size_t g_buddy_alloc_count = 0;
+    static size_t g_buddy_free_count = 0;
 
     void *Buddy::alloc_pages(size_t pages) {
         auto start = std::chrono::high_resolution_clock::now();
@@ -26,6 +28,8 @@ namespace slub {
 
         g_total_pages += pages;
         g_current_pages += pages;
+        g_buddy_alloc_count++;
+
         auto end = std::chrono::high_resolution_clock::now();
         g_buddy_alloc_time_ms += std::chrono::duration<double, std::milli>(end - start).count();
 
@@ -37,6 +41,7 @@ namespace slub {
             auto start = std::chrono::high_resolution_clock::now();
             std::free(ptr);
             g_current_pages -= pages;
+            g_buddy_free_count++;
             auto end = std::chrono::high_resolution_clock::now();
             g_buddy_free_time_ms += std::chrono::duration<double, std::milli>(end - start).count();
         }
@@ -58,8 +63,18 @@ namespace slub {
         return g_buddy_free_time_ms;
     }
 
+    size_t Buddy::get_alloc_count() {
+        return g_buddy_alloc_count;
+    }
+
+    size_t Buddy::get_free_count() {
+        return g_buddy_free_count;
+    }
+
     void Buddy::reset_timers() {
         g_buddy_alloc_time_ms = 0;
         g_buddy_free_time_ms = 0;
+        g_buddy_alloc_count = 0;
+        g_buddy_free_count = 0;
     }
 }  // namespace slub
