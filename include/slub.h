@@ -16,7 +16,19 @@ namespace slub {
 
     struct Buddy {
         static void *alloc_pages(size_t pages);
-        static void free_pages(void *p);
+        static void free_pages(void *p, size_t pages);
+        static size_t get_current_pages();
+        static size_t get_total_allocated_pages();
+        static double get_alloc_time_ms();
+        static double get_free_time_ms();
+        static void reset_timers();
+    };
+
+    struct SlubStats {
+        size_t total_slabs;
+        size_t objects_inuse;
+        size_t objects_total;
+        size_t memory_usage_bytes;
     };
 
     static inline std::uintptr_t align_down(std::uintptr_t addr,
@@ -64,11 +76,6 @@ namespace slub {
 
         static constexpr size_t ptr_size_  = sizeof(void *);
         static constexpr size_t ptr_align_ = alignof(void *);
-
-        static constexpr size_t max_const(size_t a, size_t b) {
-            return a > b ? a : b;
-        }
-
         // Round up n to multiple of align; align must be power-of-two.
         static constexpr size_t round_up_pow2(size_t n, size_t align) {
             return (n + align - 1) & ~(align - 1);
@@ -77,9 +84,9 @@ namespace slub {
         // Free-list next pointer is stored in object body, so size/alignment
         // must be at least pointer-sized/pointer-aligned.
         static constexpr size_t obj_align_ =
-            max_const(raw_obj_align_, ptr_align_);
+            std::max(raw_obj_align_, ptr_align_);
         static constexpr size_t obj_size_ =
-            round_up_pow2(max_const(raw_obj_size_, ptr_size_), obj_align_);
+            round_up_pow2(std::max(raw_obj_size_, ptr_size_), obj_align_);
 
         constexpr static size_t pages_      = PAGES_PER_SLAB;
         constexpr static size_t slab_bytes_ = SLAB_BYTES;
@@ -93,10 +100,36 @@ namespace slub {
         void *alloc();
         void free(void *ptr);
 
+        SlubStats get_stats() const {
+            size_t total_slabs = partial.size() + full.size() + empty.size();
+            size_t objects_total = 0;
+            if (total_slabs > 0) {
+                // All slabs have same capacity
+                // We can get it from any slab, or calculate it.
+                // Since we don't have a slab instance, we calculate it.
+                auto base = (uintptr_t)0;
+                auto cur = align_up(base + sizeof(SlabHeader), obj_align_);
+                auto end = base + slab_bytes_;
+                size_t per_slab = 0;
+                while (cur + obj_size_ <= end) {
+                    per_slab++;
+                    cur += obj_size_;
+                }
+                objects_total = total_slabs * per_slab;
+            }
+            return {
+                total_slabs,
+                inuse_objects_,
+                objects_total,
+                total_slabs * slab_bytes_
+            };
+        }
+
     private:
         util::IntrusiveList<SlabHeader> partial{};
         util::IntrusiveList<SlabHeader> full{};
         util::IntrusiveList<SlabHeader> empty{};
+        size_t inuse_objects_ = 0;
 
         SlabHeader *new_slab();
         void init_slab_headers(SlabHeader *slab);
@@ -189,8 +222,8 @@ namespace slub {
 
     template <typename ObjType>
     void *SlubAllocator<ObjType>::alloc() {
-        if (obj_size_ > kMax) {
-            size_t pages = (obj_size_ + PAGE_SIZE - 1) / PAGE_SIZE;
+        if constexpr (obj_size_ > kMax) {
+            constexpr size_t pages = (obj_size_ + PAGE_SIZE - 1) / PAGE_SIZE;
             return Buddy::alloc_pages(pages);
         }
         SlabHeader *slab = nullptr;
@@ -213,6 +246,7 @@ namespace slub {
         void *obj      = slab->freelist;
         slab->freelist = *reinterpret_cast<void **>(obj);
         slab->inuse++;
+        inuse_objects_++;
 
         if (slab->inuse == slab->total) {
             to_full(slab);
@@ -230,6 +264,7 @@ namespace slub {
         *reinterpret_cast<void **>(ptr) = slab_header->freelist;
         slab_header->freelist           = ptr;
         slab_header->inuse--;
+        inuse_objects_--;
         if (slab_header->inuse == 0) {
             to_empty(slab_header);
         } else if (slab_header->inuse == slab_header->total - 1) {
@@ -243,8 +278,9 @@ namespace slub {
             printf("can't free nullptr\n");
             return;
         }
-        if (obj_size_ > kMax) {
-            Buddy::free_pages(ptr);
+        if constexpr (obj_size_ > kMax) {
+            constexpr size_t pages = (obj_size_ + PAGE_SIZE - 1) / PAGE_SIZE;
+            Buddy::free_pages(ptr, pages);
             return;
         }
 
